@@ -1,2 +1,5 @@
 product_optimisation.py
 optimiser
+.streamlit/
+pycache/
+*.pyc

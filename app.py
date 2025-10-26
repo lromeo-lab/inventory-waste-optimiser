@@ -1,198 +1,213 @@
 import streamlit as st
 import pandas as pd
 from model import solve_box_problem
+import db_manager
 
+# ----------------------------------------------------------------------
+# APLICACIÓN STREAMLIT
+# ----------------------------------------------------------------------
 
 # --- 1. Configuración de la Página y Título ---
 st.set_page_config(page_title="Optimizador TGTG", layout="wide")
-st.title("📦 Optimizador de Cajas 'Too Good To Go'")
+st.title("📦 Optimizador de Packs 'Too Good To Go'")
 st.write("Esta app te ayuda a decidir la composición óptima de tus cajas para minimizar pérdidas.")
 
-# --- 2. Gestión del Estado (Catálogo de Productos) ---
-# Usamos st.session_state para guardar el catálogo de productos
-# entre ejecuciones de la app.
-
-if 'product_catalog' not in st.session_state:
-    # Si es la primera vez que se carga, creamos un catálogo de ejemplo
-    st.session_state.product_catalog = [
-        {"Product Name": "Croissant", "Retail Price": 2.50, "Purchase Cost": 0.80, "Allow Repeats?": True},
-        {"Product Name": "Napolitana Choc.", "Retail Price": 2.80, "Purchase Cost": 1.00, "Allow Repeats?": True},
-        {"Product Name": "Palmera", "Retail Price": 3.00, "Purchase Cost": 1.10, "Allow Repeats?": False},
-        {"Product Name": "Sandwich Jamón", "Retail Price": 4.50, "Purchase Cost": 2.20, "Allow Repeats?": False},
-        {"Product Name": "Cookie", "Retail Price": 2.00, "Purchase Cost": 0.50, "Allow Repeats?": True},
-    ]
-
-# --- 3. Definición de las Pestañas (UX) ---
-tab_optimizar, tab_catalogo = st.tabs(["🛒 Optimizar Cajas (Diario)", "📚 Gestionar Catálogo (Admin)"])
+# --- 2. Conexión a la Base de Datos ---
+# Obtenemos la conexión a la BD (cacheada por Streamlit)
+try:
+    db = db_manager.get_db()
+except Exception as e:
+    st.error(f"Error al conectar con Firebase. Verifica tus 'secrets.toml'.")
+    st.error(e)
+    st.stop()
 
 
-# --- PESTAÑA 1: OPTIMIZAR (Uso Diario) ---
-with tab_optimizar:
+# --- 3. Definición de las Pestañas ---
+tab_daily, tab_admin = st.tabs(["🛒 Optimizar Cajas (Diario)", "📚 Gestionar Catálogo (Admin)"])
+
+# ----------------------------------------------------------------------
+# PESTAÑA 1: Optimizar Cajas (Diario)
+# ----------------------------------------------------------------------
+with tab_daily:
     st.header("Paso 1: Define las reglas del día")
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        precio_caja = st.number_input("Precio de Venta de la Caja (€)", min_value=0.1, value=4.0, step=0.1)
+        box_sale_price = st.number_input("Precio de Venta de la Caja (€)", min_value=0.0, value=4.00, step=0.50)
     with col2:
-        valor_minimo = st.number_input("Valor Retail Mínimo (€)", min_value=0.1, value=12.0, step=0.1)
+        box_retail_min = st.number_input("Valor Retail Mínimo (€)", min_value=0.0, value=12.00, step=1.00)
     with col3:
-        max_cajas = st.number_input("Nº Máximo de Cajas a crear", min_value=1, value=5, step=1)
+        max_boxes = st.number_input("Nº Máximo de Cajas a crear", min_value=1, value=5, step=1)
 
     st.header("Paso 2: Introduce tu inventario de hoy")
     st.info("Rellena solo las cantidades de los productos que tienes hoy. Marca los que caducan.")
 
-    # Convertir el catálogo (lista de dicts) a un DataFrame para el editor
-    if not st.session_state.product_catalog:
-        st.error("Tu catálogo de productos está vacío. Ve a la pestaña 'Gestionar Catálogo' para añadir productos.")
+    # --- Cargar Catálogo desde la BD ---
+    # Ya no usamos session_state, leemos de la BD cada vez.
+    try:
+        product_catalog_df = db_manager.get_catalog_df(db)
+    except Exception as e:
+        st.error(f"No se pudo cargar el catálogo desde Firestore: {e}")
+        st.stop()
+
+
+    if product_catalog_df.empty:
+        st.warning("Tu catálogo de productos está vacío. Ve a la pestaña 'Gestionar Catálogo' para añadir productos.")
     else:
-        df_catalogo = pd.DataFrame(st.session_state.product_catalog)
-        
-        # Añadir las columnas de 'día a día'
-        df_catalogo["Quantity"] = 0
-        df_catalogo["Expires Today?"] = False
-        
-        # Reordenar las columnas para una mejor UX
-        column_order = [
-            "Quantity", 
-            "Expires Today?", 
-            "Product Name", 
-            "Retail Price", 
-            "Purchase Cost", 
-            "Allow Repeats?"
-        ]
-        
-        # Usar st.data_editor para una interfaz tipo Excel
-        edited_inventory_df = st.data_editor(
-            df_catalogo[column_order],
-            column_config={
-                "Quantity": st.column_config.NumberColumn("Cantidad Hoy", min_value=0),
-                "Expires Today?": st.column_config.CheckboxColumn("Caduca Hoy?"),
-                "Product Name": st.column_config.TextColumn("Producto", disabled=True),
-                "Retail Price": st.column_config.NumberColumn("Precio Retail", format="€%.2f", disabled=True),
-                "Purchase Cost": st.column_config.NumberColumn("Coste", format="€%.2f", disabled=True),
-                "Allow Repeats?": st.column_config.CheckboxColumn("Permite Repetir?", disabled=True),
-            },
-            hide_index=True,
-            # --- CAMBIO AQUÍ ---
-            width='stretch' # Reemplaza a use_container_width=True
-        )
+        # Creamos el formulario para el inventario del día
+        with st.form("inventory_form"):
+            
+            # Usamos una copia para no modificar el DataFrame original
+            daily_inventory_df = product_catalog_df.copy()
+            
+            # Añadimos las columnas 'Cantidad Hoy' y 'Caduca Hoy'
+            daily_inventory_df['Cantidad Hoy'] = 0
+            daily_inventory_df['Caduca Hoy'] = False
+            
+            # Mostramos el editor de datos para que el usuario rellene
+            edited_df = st.data_editor(
+                daily_inventory_df,
+                column_config={
+                    "id": None, # Ocultamos la columna 'id'
+                    "Nombre": st.column_config.TextColumn("Producto", disabled=True),
+                    "Coste (€)": None, # Ocultamos
+                    "Precio Retail (€)": None, # Ocultamos
+                    "Permite Repetir?": None, # Ocultamos
+                    "Cantidad Hoy": st.column_config.NumberColumn("Cantidad Hoy", min_value=0, step=1),
+                    "Caduca Hoy": st.column_config.CheckboxColumn("Caduca Hoy")
+                },
+                hide_index=True,
+                width="stretch"
+            )
+            
+            submit_button = st.form_submit_button("Optimizar Cajas")
 
-        st.header("Paso 3: ¡Optimizar!")
-        st.write("Haz clic aquí para calcular el plan de cajas óptimo.")
+        # --- Lógica de Optimización ---
+        if submit_button:
+            # Filtramos solo los productos con cantidad > 0
+            products_to_optimize = edited_df[edited_df['Cantidad Hoy'] > 0].copy()
+            
+            if products_to_optimize.empty:
+                st.error("No has introducido ningún producto.")
+            else:
+                st.success("Calculando la solución óptima...")
+                
+                # Renombramos columnas para que coincidan con el modelo
+                products_to_optimize.rename(columns={
+                    'Cantidad Hoy': 'Quantity',
+                    'Caduca Hoy': 'Expires Today'
+                }, inplace=True)
 
-        # --- CAMBIO AQUÍ ---
-        if st.button("GENERAR PLAN DE CAJAS ÓPTIMO", type="primary", width='stretch'): # Reemplaza a use_container_width=True
-            with st.spinner("Calculando la mejor combinación..."):
-                # 1. Filtrar solo los productos con cantidad > 0
-                df_to_solve = edited_inventory_df[edited_inventory_df["Quantity"] > 0].copy()
-
-                if df_to_solve.empty:
-                    st.warning("No has introducido cantidad para ningún producto.")
-                elif df_to_solve["Expires Today?"].sum() == 0 and df_to_solve["Quantity"].sum() > 0:
-                     st.warning("No has marcado ningún producto como 'Caduca Hoy?'. El optimizador no tiene nada que 'salvar' obligatoriamente. Añade productos que caduquen o revisa tu inventario.")
-                else:
-                    # 2. Llamar al optimizador (¡ahora importado desde model.py!)
+                try:
                     boxes, net_loss, status = solve_box_problem(
-                        df_to_solve,
-                        valor_minimo,
-                        precio_caja,
-                        max_cajas
+                        products_to_optimize,
+                        box_retail_min,
+                        box_sale_price,
+                        max_boxes
                     )
-
-                    # 3. Mostrar resultados
-                    if status == "Optimal":
-                        st.success("¡Plan Óptimo Encontrado!")
+                    
+                    st.header("Resultados de la Optimización")
+                    
+                    if status == "Infeasible":
+                        st.error("No se encontró una solución. Es posible que no se puedan cumplir las reglas (ej. no hay suficientes productos para alcanzar el valor retail mínimo).")
+                    
+                    elif status == "Optimal":
+                        st.subheader(f"✅ ¡Solución Óptima Encontrada!")
                         
-                        total_boxes = len(boxes)
-                        total_revenue = total_boxes * precio_caja
-                        total_cost = total_revenue + net_loss
+                        col1, col2 = st.columns(2)
+                        col1.metric("Pérdida Neta Total", f"€{net_loss:.2f}")
+                        col2.metric("Nº de Cajas Creadas", len(boxes))
                         
-                        st.subheader("Resumen de la Operación")
-                        res_col1, res_col2, res_col3 = st.columns(3)
-                        res_col1.metric("Pérdida Neta Total", f"€{net_loss:.2f}")
-                        res_col2.metric("Cajas Creadas", f"{total_boxes}")
-                        res_col3.metric("Ingresos Totales", f"€{total_revenue:.2f}")
+                        st.subheader("Composición de las Cajas Recomendadas:")
                         
-                        st.subheader("Composición de Cajas Recomendada")
                         if not boxes:
-                             st.info("La solución óptima es no crear ninguna caja (probablemente la pérdida era menor no vendiendo).")
+                            st.warning("No se ha creado ninguna caja. Es probable que no fuera rentable o necesario.")
                         
-                        for box_name, data in boxes.items():
-                            with st.container(border=True):
-                                st.subheader(f"📦 {box_name}")
-                                b_col1, b_col2, b_col3 = st.columns(3)
-                                b_col1.metric("Valor Retail", f"€{data['Total Retail Value']:.2f}")
-                                b_col2.metric("Coste Productos", f"€{data['Total Purchase Cost']:.2f}")
-                                b_col3.metric("Resultado Caja", f"€{data['Net for Box']:.2f}", 
-                                               help="Ingreso (€4.00) - Coste de Productos")
-                                
-                                st.markdown("**Contenido:**")
-                                for item in data['Items']:
-                                    st.markdown(f"- {item}")
-                                    
-                    elif status == "Infeasible":
-                         st.error("No se ha podido encontrar una solución. Es 'Inviable'.")
-                         st.write("Esto suele pasar si es imposible cumplir las reglas. Por ejemplo:")
-                         st.write("- Tienes demasiados productos que caducan pero no caben en las cajas máximas.")
-                         st.write("- Los productos que caducan no pueden combinarse para alcanzar el valor retail mínimo de 12€.")
-                         st.write("- Prueba a aumentar el 'Nº Máximo de Cajas' o añade más productos de relleno.")
+                        for i, box in enumerate(boxes):
+                            box_cost = box['Total Cost']
+                            box_value = box['Total Retail Value']
+                            box_net = box_cost - box_sale_price
+                            
+                            with st.expander(f"📦 Caja {i+1} | Valor: €{box_value:.2f} | Coste: €{box_cost:.2f} | Pérdida Neta: €{box_net:.2f}"):
+                                st.dataframe(box['Items'], hide_index=True, width="stretch")
+                    
                     else:
-                        st.error(f"No se pudo encontrar una solución óptima. Estado: {status}")
+                        st.warning("El optimizador no pudo encontrar una solución óptima (estado: {status}).")
+
+                except Exception as e:
+                    st.error(f"Ha ocurrido un error durante la optimización: {e}")
 
 
-# --- PESTAÑA 2: GESTIONAR CATÁLOGO (Admin) ---
-with tab_catalogo:
-    st.header("Gestionar Catálogo de Productos")
-    st.write("Aquí puedes añadir o eliminar productos de tu lista 'maestra'.")
-    st.write("Estos productos aparecerán en la pestaña 'Optimizar Cajas' cada día.")
-
-    # --- Formulario para Añadir Productos ---
-    st.subheader("Añadir Nuevo Producto")
-    with st.form("nuevo_producto_form", clear_on_submit=True):
+# ----------------------------------------------------------------------
+# PESTAÑA 2: Gestionar Catálogo (Admin)
+# ----------------------------------------------------------------------
+with tab_admin:
+    st.header("Añadir un nuevo producto al catálogo")
+    
+    # Formulario para añadir nuevos productos
+    with st.form("add_product_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            prod_name = st.text_input("Nombre del Producto")
-            prod_retail = st.number_input("Precio Retail (€)", min_value=0.0, step=0.1)
+            nombre = st.text_input("Nombre del Producto")
+            coste = st.number_input("Coste (€)", min_value=0.0, step=0.01, format="%.2f")
         with col2:
-            prod_cost = st.number_input("Coste de Compra (€)", min_value=0.0, step=0.1)
-            prod_repeats = st.checkbox("Permitir repetir en una caja?", value=True)
+            precio_retail = st.number_input("Precio Retail (€)", min_value=0.0, step=0.01, format="%.2f")
+            permite_repetir = st.checkbox("Permite Repetir en la misma caja?", value=True)
         
-        submitted = st.form_submit_button("Añadir Producto al Catálogo")
-        if submitted:
-            if prod_name:
-                new_product = {
-                    "Product Name": prod_name,
-                    "Retail Price": prod_retail,
-                    "Purchase Cost": prod_cost,
-                    "Allow Repeats?": prod_repeats
-                }
-                st.session_state.product_catalog.append(new_product)
-                st.success(f"¡Producto '{prod_name}' añadido!")
-            else:
+        submitted_add = st.form_submit_button("Añadir Producto")
+        
+        if submitted_add:
+            if not nombre:
                 st.error("El nombre del producto no puede estar vacío.")
+            else:
+                new_product_data = {
+                    "Nombre": nombre,
+                    "Coste (€)": coste,
+                    "Precio Retail (€)": precio_retail,
+                    "Permite Repetir?": permite_repetir
+                }
+                try:
+                    db_manager.add_product(db, new_product_data)
+                    st.success(f"¡Producto '{nombre}' añadido con éxito!")
+                except Exception as e:
+                    st.error(f"Error al añadir producto: {e}")
 
     st.divider()
-
-    # --- Ver y Eliminar Productos ---
-    st.subheader("Catálogo Actual")
     
-    if not st.session_state.product_catalog:
-        st.info("Aún no hay productos en tu catálogo.")
-    else:
-        # Convertir a DataFrame para mostrarlo
-        catalog_df = pd.DataFrame(st.session_state.product_catalog)
-        st.dataframe(catalog_df, width='stretch', hide_index=True)
+    st.header("Catálogo de Productos Actual")
+    
+    # Cargar y mostrar el catálogo actual
+    try:
+        current_catalog_df = db_manager.get_catalog_df(db)
+        
+        if current_catalog_df.empty:
+            st.info("Aún no hay productos en tu catálogo.")
+        else:
+            st.dataframe(current_catalog_df, hide_index=True, width="stretch",
+                         column_config={"id": None}) # Ocultamos el ID en la vista
 
-        # Lógica para Eliminar
-        st.subheader("Eliminar un Producto")
-        products_names = [p["Product Name"] for p in st.session_state.product_catalog]
-        product_to_delete = st.selectbox("Selecciona un producto para eliminar", options=products_names, index=None, placeholder="Elige un producto...")
-
-        if st.button("Eliminar Producto Seleccionado", type="secondary"):
-            if product_to_delete:
-                # Encontrar y eliminar el producto
-                st.session_state.product_catalog = [p for p in st.session_state.product_catalog if p["Product Name"] != product_to_delete]
-                st.success(f"Producto '{product_to_delete}' eliminado.")
-                st.rerun() # Recargar la app para actualizar la lista
-            else:
-                st.warning("Por favor, selecciona un producto de la lista para eliminar.")
+            st.subheader("Eliminar un producto")
+            # Creamos un selector con los nombres de los productos
+            product_names = current_catalog_df['Nombre'].tolist()
+            product_ids = current_catalog_df['id'].tolist()
+            
+            # Mapeo de Nombre a ID
+            name_to_id_map = {name: id for name, id in zip(product_names, product_ids)}
+            
+            product_to_delete = st.selectbox("Selecciona un producto para eliminar", options=[""] + product_names)
+            
+            if st.button("Eliminar Producto Seleccionado", type="primary"):
+                if not product_to_delete:
+                    st.warning("Por favor, selecciona un producto.")
+                else:
+                    try:
+                        product_id_to_delete = name_to_id_map[product_to_delete]
+                        db_manager.delete_product(db, product_id_to_delete)
+                        st.success(f"¡Producto '{product_to_delete}' eliminado!")
+                        # Forzamos un refresco de la app para que la lista se actualice
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al eliminar producto: {e}")
+    
+    except Exception as e:
+        st.error(f"Error al cargar el catálogo para la vista de admin: {e}")
