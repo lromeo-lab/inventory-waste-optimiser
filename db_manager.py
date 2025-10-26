@@ -7,7 +7,6 @@ import pandas as pd
 # GESTOR DE BASE DE DATOS (FIREBASE)
 # ----------------------------------------------------------------------
 
-# Usamos st.cache_resource para inicializar la conexión una sola vez.
 @st.cache_resource
 def get_db():
     """
@@ -19,7 +18,7 @@ def get_db():
         firebase_admin.get_app()
     except ValueError:
         # Si no está inicializada, la configura
-        # Carga las credenciales desde el archivo secrets.toml
+        # Carga las credenciales desde los secretos de Streamlit
         creds_dict = st.secrets["firebase_credentials"]
         creds = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(creds)
@@ -29,8 +28,6 @@ def get_db():
 
 def get_catalog_collection(db):
     """Devuelve la referencia a la colección 'products'."""
-    # IMPORTANTE: Esta es la ruta de la colección en Firestore.
-    # Puedes cambiar 'products' si la nombraste de otra forma.
     return db.collection('products')
 
 def get_catalog_df(db):
