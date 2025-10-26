@@ -2,6 +2,7 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
+import ast  # --- ¡LÍNEA NUEVA! ---
 
 # ----------------------------------------------------------------------
 # GESTOR DE BASE DE DATOS (FIREBASE)
@@ -14,16 +15,29 @@ def get_db():
     Usa las credenciales de st.secrets.
     """
     try:
-        # Intenta obtener la app de Firebase por defecto (si ya está inicializada)
         firebase_admin.get_app()
     except ValueError:
-        # Si no está inicializada, la configura
-        # Carga las credenciales desde los secretos de Streamlit
-        creds_dict = st.secrets["firebase_credentials"]
-        creds = credentials.Certificate(creds_dict)
-        firebase_admin.initialize_app(creds)
+        
+        # --- ¡INICIO DE LA NUEVA LÓGICA! ---
+        try:
+            creds_from_secrets = st.secrets["firebase_credentials"]
+            
+            # Verificamos si es un string (que es lo que causa el error)
+            if isinstance(creds_from_secrets, str):
+                # Si es un string, lo convertimos a diccionario de forma segura
+                creds_dict = ast.literal_eval(creds_from_secrets)
+            else:
+                # Si ya es un diccionario (como debería ser), lo usamos
+                creds_dict = creds_from_secrets
+            
+            creds = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(creds)
+
+        except Exception as e:
+            # Si todo falla, lanzamos un error claro
+            raise Exception(f"FALLO CRÍTICO AL INICIALIZAR FIREBASE. Error: {e}. Verifica tus 'secrets' en Streamlit Cloud.")
+        # --- FIN DE LA NUEVA LÓGICA ---
     
-    # Devuelve el cliente de Firestore
     return firestore.client()
 
 def get_catalog_collection(db):
@@ -40,24 +54,20 @@ def get_catalog_df(db):
     products_list = []
     for doc in docs:
         product_data = doc.to_dict()
-        product_data['id'] = doc.id  # Añadimos el ID del documento
+        product_data['id'] = doc.id
         products_list.append(product_data)
         
     if not products_list:
-        # Si la base de datos está vacía, devuelve un DataFrame vacío
         return pd.DataFrame(columns=['Nombre', 'Coste (€)', 'Precio Retail (€)', 'Permite Repetir?', 'id'])
 
     df = pd.DataFrame(products_list)
-    # Reordenamos las columnas para que sea más legible
     column_order = ['id', 'Nombre', 'Coste (€)', 'Precio Retail (€)', 'Permite Repetir?']
-    # Filtramos para asegurarnos de que solo incluimos columnas que existen
     df = df[[col for col in column_order if col in df.columns]]
     return df
 
 def add_product(db, product_data):
     """
     Añade un nuevo producto a la colección 'products'.
-    product_data debe ser un diccionario.
     """
     collection_ref = get_catalog_collection(db)
     collection_ref.add(product_data)
