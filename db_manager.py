@@ -2,79 +2,100 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
-import ast  # --- ¡LÍNEA NUEVA! ---
+import ast # Para forzar la conversión de string a dict
 
-# ----------------------------------------------------------------------
-# GESTOR DE BASE DE DATOS (FIREBASE)
-# ----------------------------------------------------------------------
+# --- Constantes ---
+COLLECTION_NAME = 'products'
+# --- Definimos las columnas esperadas ---
+EXPECTED_COLS = ['id', 'Nombre', 'Coste (€)', 'Precio Retail (€)', 'Permite Repetir?', 'Vida Útil (días)']
 
+# --- Inicialización de Firebase (Cacheada) ---
 @st.cache_resource
 def get_db():
-    """
-    Inicializa y devuelve la conexión a la base de datos Firestore.
-    Usa las credenciales de st.secrets.
-    """
     try:
-        firebase_admin.get_app()
-    except ValueError:
+        # 1. Intentar obtener las credenciales de los secretos
+        creds_dict = st.secrets["FIREBASE"]
         
-        # --- ¡INICIO DE LA NUEVA LÓGICA! ---
-        try:
-            creds_from_secrets = st.secrets["firebase_credentials"]
-            
-            # Verificamos si es un string (que es lo que causa el error)
-            if isinstance(creds_from_secrets, str):
-                # Si es un string, lo convertimos a diccionario de forma segura
-                creds_dict = ast.literal_eval(creds_from_secrets)
-            else:
-                # Si ya es un diccionario (como debería ser), lo usamos
-                creds_dict = creds_from_secrets
-            
-            creds = credentials.Certificate(creds_dict)
-            firebase_admin.initialize_app(creds)
+        # 2. Comprobar si es un string y convertirlo
+        if isinstance(creds_dict, str):
+            try:
+                creds_dict = ast.literal_eval(creds_dict)
+            except Exception as e:
+                st.error(f"Error al parsear 'firebase_credentials' (string a dict): {e}")
+                return None
+        
+        # 3. Comprobar si es un diccionario
+        if not isinstance(creds_dict, dict):
+            st.error(f"Las 'firebase_credentials' no son un diccionario. Tipo encontrado: {type(creds_dict)}")
+            return None
 
-        except Exception as e:
-            # Si todo falla, lanzamos un error claro
-            raise Exception(f"FALLO CRÍTICO AL INICIALIZAR FIREBASE. Error: {e}. Verifica tus 'secrets' en Streamlit Cloud.")
-        # --- FIN DE LA NUEVA LÓGICA ---
-    
-    return firestore.client()
+        # 4. Inicializar la app
+        cred = credentials.Certificate(creds_dict)
+        
+        # Evitar error de reinicialización
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        
+        return firestore.client()
 
-def get_catalog_collection(db):
-    """Devuelve la referencia a la colección 'products'."""
-    return db.collection('products')
+    except Exception as e:
+        st.error(f"""
+            **Error al conectar con Firebase.**
+            Detalle: {e}
+            Asegúrate de que tu secreto 'firebase_credentials' en Streamlit Cloud
+            es una copia exacta de tu archivo local '.streamlit/secrets.toml'
+            (empezando por [firebase_credentials]).
+        """)
+        return None
 
-def get_catalog_df(db):
-    """
-    Obtiene el catálogo de productos de Firestore y lo devuelve como un DataFrame.
-    """
-    collection_ref = get_catalog_collection(db)
-    docs = collection_ref.stream()
+# --- Operaciones CRUD ---
+
+@st.cache_data(ttl=60) # Cachear por 60 segundos
+def get_catalog_df(_db):
+    if _db is None:
+        return pd.DataFrame(columns=EXPECTED_COLS) # Devuelve DF vacío si no hay BD
+        
+    products_ref = _db.collection(COLLECTION_NAME)
+    docs = products_ref.stream()
     
     products_list = []
     for doc in docs:
-        product_data = doc.to_dict()
-        product_data['id'] = doc.id
-        products_list.append(product_data)
-        
+        doc_data = doc.to_dict()
+        doc_data['id'] = doc.id
+        products_list.append(doc_data)
+
     if not products_list:
-        return pd.DataFrame(columns=['Nombre', 'Coste (€)', 'Precio Retail (€)', 'Permite Repetir?', 'id'])
+        # Devuelve un DF vacío con las columnas esperadas si no hay datos
+        return pd.DataFrame(columns=EXPECTED_COLS)
 
     df = pd.DataFrame(products_list)
-    column_order = ['id', 'Nombre', 'Coste (€)', 'Precio Retail (€)', 'Permite Repetir?']
-    df = df[[col for col in column_order if col in df.columns]]
+    
+    # Asegurar que todas las columnas esperadas existan, añadiendo las que falten
+    for col in EXPECTED_COLS:
+        if col not in df.columns:
+            if col == 'Vida Útil (días)':
+                 df[col] = 1
+            elif col == 'Permite Repetir?':
+                df[col] = True
+            elif col != 'id':
+                 df[col] = pd.NA
+            
+    # Reordenar y filtrar columnas para que coincidan exactamente
+    df = df[EXPECTED_COLS]
     return df
 
-def add_product(db, product_data):
-    """
-    Añade un nuevo producto a la colección 'products'.
-    """
-    collection_ref = get_catalog_collection(db)
-    collection_ref.add(product_data)
+def add_product(_db, product_data):
+    if _db is None: return
+    product_data.pop('id', None)
+    _db.collection(COLLECTION_NAME).add(product_data)
+    get_catalog_df.clear() # Limpiar caché
 
-def delete_product(db, product_id):
-    """
-    Elimina un producto de la colección 'products' usando su ID de documento.
-    """
-    collection_ref = get_catalog_collection(db)
-    collection_ref.document(product_id).delete()
+def update_product(_db, product_id, product_data):
+    if _db is None: return
+    _db.collection(COLLECTION_NAME).document(product_id).update(product_data)
+    get_catalog_df.clear() # Limpiar caché
+
+def delete_product(_db, product_id):
+    if _db is None: return
+    _db.collection(COLLECTION_NAME).document(product_id).delete()
+    get_catalog_df.clear() # Limpiar caché

@@ -1,112 +1,132 @@
-import pandas as pd
 import pulp
+import pandas as pd
 
+# ----------------------------------------------------------------------
+# LÓGICA DEL OPTIMIZADOR (v2)
+# Esta es la versión que devuelve un diccionario de cajas,
+# que es lo que app.py espera.
+# ----------------------------------------------------------------------
 
 def solve_box_problem(products_df, box_retail_min, box_sale_price, max_boxes):
     """
-    Resuelve el problema de optimización de cajas TGTG (v2) usando PuLP.
-    
-    Esta versión usa correctamente CANTIDADES de producto, no ítems únicos.
-
-    products_df: Un DataFrame de pandas con las columnas:
-        'Product Name', 'Retail Price', 'Purchase Cost', 'Expires Today?', 'Quantity'
-        'Allow Repeats?' (Booleano)
-    box_retail_min: El valor retail mínimo (ej. 12.0)
-    box_sale_price: El ingreso por vender una caja (ej. 4.0)
-    max_boxes: El número máximo de cajas que estás dispuesto a hacer.
+    Resuelve el problema de asignación de cajas v2, enfocado en cantidades.
     """
-    
-    # --- 1. Crear el Problema ---
-    prob = pulp.LpProblem("TGTG_Box_Optimization_v2", pulp.LpMinimize)
+    try:
+        # --- 1. Inicialización de Datos ---
+        # Convertir el DataFrame a un formato de diccionario más fácil
+        products = products_df.to_dict('index')
+        # Crear los IDs de los productos (usando el índice del DataFrame)
+        product_ids = list(products.keys())
+        # Crear los IDs de las cajas (de 0 a max_boxes-1)
+        box_ids = list(range(max_boxes))
 
-    # --- 2. Pre-procesar Datos (Parámetros) ---
-    products = products_df.to_dict('index')
-    product_ids = list(products.keys())
-    box_ids = list(range(max_boxes))
-    BIG_M = 1000 # Un valor "suficientemente grande"
+        # --- 2. Creación del Problema ---
+        # Ahora Maximizamos el Resultado Neto.
+        prob = pulp.LpProblem("Maximizar_Resultado_Neto", pulp.LpMaximize)
 
-    # --- 3. Variables de Decisión ---
-    
-    # x[(i, j)] = La CANTIDAD (Entero) de producto i a poner en la caja j
-    x = pulp.LpVariable.dicts("qty_in_box",
-                             ((i, j) for i in product_ids for j in box_ids),
-                             cat='Integer',
-                             lowBound=0)
-    
-    # y[j] = 1 si la caja j se crea/usa, 0 si no
-    y = pulp.LpVariable.dicts("box_used", box_ids, cat='Binary')
-
-    # --- 4. Función Objetivo (Minimizar Pérdida Neta) ---
-    # Minimizar: (Coste Total) - (Ingreso Total)
-    
-    total_cost = pulp.lpSum(products[i]['Purchase Cost'] * x[(i, j)] 
-                           for i in product_ids for j in box_ids)
-    
-    total_revenue = pulp.lpSum(y[j] * box_sale_price for j in box_ids)
-    
-    prob += total_cost - total_revenue, "Pérdida Neta Total"
-
-    # --- 5. Restricciones ---
-    
-    for j in box_ids:
-        # Restricción 3: Valor Mínimo de la Caja
-        # El valor retail total en la caja debe cumplir el mínimo si se usa.
-        prob += pulp.lpSum(products[i]['Retail Price'] * x[(i, j)] for i in product_ids) >= box_retail_min * y[j], f"Box_Value_Min_{j}"
-
-        # Restricción 4: Ligar x e y (Big M)
-        # El número total de ítems en una caja debe ser 0 si la caja no se usa.
-        prob += pulp.lpSum(x[(i, j)] for i in product_ids) <= BIG_M * y[j], f"Link_x_y_{j}"
-
-    for i in product_ids:
-        # Restricción 1 y 2: Disponibilidad de Producto
-        if products[i]['Expires Today?']:
-            # Restricción 1: Ítems que caducan (Obligatorio Vender)
-            # La cantidad total usada en TODAS las cajas debe ser IGUAL a la disponible.
-            prob += pulp.lpSum(x[(i, j)] for j in box_ids) == products[i]['Quantity'], f"Must_Use_Product_{i}"
-        else:
-            # Restricción 2: Ítems de "Relleno" (Opcional)
-            # La cantidad total usada en TODAS las cajas no puede EXCEDER la disponible.
-            prob += pulp.lpSum(x[(i, j)] for j in box_ids) <= products[i]['Quantity'], f"At_Most_Once_Product_{i}"
-
-    # Restricción 6: Regla de "No Repetir"
-    for i in product_ids:
-        if not products[i]['Allow Repeats?']:
-            # Si no se permiten repeticiones, para cada caja...
-            for j in box_ids:
-                # La cantidad de este ítem i en esta caja j puede ser como máximo 1.
-                prob += x[(i, j)] <= 1, f"No_Repeats_{i}_in_{j}"
-            
-    # --- 6. Resolver el Problema ---
-    # Ocultar los logs de la consola en Streamlit
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
-    
-    # --- 7. Procesar Resultados ---
-    status = pulp.LpStatus[prob.status]
-    
-    if status == 'Optimal':
-        boxes = {}
-        for j in box_ids:
-            if y[j].varValue == 1:
-                box_items = []
-                total_retail = 0
-                total_cost = 0
-                for i in product_ids:
-                    item_qty = x[(i, j)].varValue
-                    if item_qty > 0:
-                        item = products[i]
-                        box_items.append(f"{item['Product Name']} (Cant: {item_qty:.0f})")
-                        total_retail += item['Retail Price'] * item_qty
-                        total_cost += item['Purchase Cost'] * item_qty
-                
-                boxes[f"Caja {j+1}"] = {
-                    'Items': box_items,
-                    'Total Retail Value': total_retail,
-                    'Total Purchase Cost': total_cost,
-                    'Net for Box': box_sale_price - total_cost
-                }
+        # --- 3. Definición de Variables --- 
+        # x[i][j] = Cantidad (entero) del producto 'i' asignada a la caja 'j'
+        x = pulp.LpVariable.dicts("cantidad_producto_caja",
+                                 ((i, j) for i in product_ids for j in box_ids),
+                                 lowBound=0,
+                                 cat='Integer')
         
-        total_net_loss = pulp.value(prob.objective)
-        return boxes, total_net_loss, status
-    else:
-        # Si no es óptimo, devuelve el estado para mostrar un error
-        return None, 0, status
+        # y[j] = 1 si la caja 'j' se usa (y por tanto se vende), 0 si no.
+        y = pulp.LpVariable.dicts("caja_usada", box_ids, cat='Binary')
+
+        # --- 4. Función Objetivo ---
+        # Queremos maximizar el resultado neto.
+        # Resultado Neto = (Ingreso Total de Cajas Vendidas) - (Coste Total de Productos Usados)
+
+        # Coste Total = Suma( Coste[i] * Cantidad[i][j] ) para todos los productos i y cajas j
+        total_cost = pulp.lpSum(products[i]['Purchase Cost'] * x[(i, j)]
+                               for i in product_ids for j in box_ids)
+        
+        # Ingreso Total = Suma( PrecioVentaCaja * y[j] ) para todas las cajas j
+        total_revenue = pulp.lpSum(y[j] * box_sale_price for j in box_ids)
+
+        # Objetivo: Maximizar (Ingreso - Coste)
+        prob += total_revenue - total_cost, "Resultado_Neto_Total"
+
+        # --- 5. Definición de Restricciones ---
+
+        # C1: Restricción de Cantidad (No podemos usar más de lo que tenemos)
+        for i in product_ids:
+            prob += pulp.lpSum(x[(i, j)] for j in box_ids) <= products[i]['Quantity'], f"Max_Cantidad_Producto_{i}"
+
+        # C2: Productos que Caducan (DEBEMOS usar todos los que caducan)
+        for i in product_ids:
+            if products[i]['Expires Today?']:
+                prob += pulp.lpSum(x[(i, j)] for j in box_ids) == products[i]['Quantity'], f"Usar_Todo_Producto_{i}"
+
+        # C3: Valor Retail Mínimo por Caja (Solo si la caja se usa)
+        #  Suma( PrecioRetail[i] * Cantidad[i][j] ) >= ValorMinimo * y[j]
+        # (Si y[j]=0, el lado derecho es 0. Si y[j]=1, es ValorMinimo)
+        for j in box_ids:
+            prob += pulp.lpSum(products[i]['Retail Price'] * x[(i, j)] for i in product_ids) >= box_retail_min * y[j], f"Valor_Minimo_Caja_{j}"
+
+        # C4: No Repetir Productos (Si Allow Repeats? es Falso)
+        # La cantidad de ese producto en esa caja no puede ser > 1
+        for i in product_ids:
+            if not products[i]['Allow Repeats?']:
+                for j in box_ids:
+                    prob += x[(i, j)] <= 1, f"No_Repetir_Producto_{i}_Caja_{j}"
+
+        # C5: Ligar 'x' con 'y' (No se pueden poner items en una caja no usada)
+        # Usamos M (un número grande). Si y[j]=0, la suma de items debe ser 0.
+        M = 1000 # Asumimos que nunca pondremos 1000 items en una caja
+        for j in box_ids:
+            prob += pulp.lpSum(x[(i, j)] for i in product_ids) <= M * y[j], f"Ligar_X_Y_Caja_{j}"
+
+        # --- 6. Resolución del Problema ---
+        prob.solve(pulp.PULP_CBC_CMD(msg=False)) # msg=False para silenciar el log
+
+        # --- 7. Extracción de Resultados ---
+        status_str = pulp.LpStatus[prob.status]
+
+        if status_str == 'Optimal':
+            box_details = []
+            
+            for j in box_ids:
+                # Si la caja j se usó
+                if y[j].value() > 0.5:
+                    items_in_box = []
+                    total_box_cost = 0
+                    total_box_retail = 0
+                    
+                    for i in product_ids:
+                        quantity = x[(i, j)].value()
+                        # Si se añadió al menos 1 unidad de este producto
+                        if quantity > 0:
+                            cost = products[i]['Purchase Cost']
+                            retail = products[i]['Retail Price']
+                            
+                            items_in_box.append({
+                                'Producto': products[i]['Product Name'],
+                                'Cantidad': int(quantity),
+                                'Coste Unit.': cost,
+                                'Coste Total Prod.': cost * quantity
+                            })
+                            
+                            total_box_cost += cost * quantity
+                            total_box_retail += retail * quantity
+                    
+                    # Añadimos el diccionario de la caja
+                    box_details.append({
+                        'Box ID': j + 1,
+                        'Items': items_in_box,
+                        'Total Cost': total_box_cost,
+                        'Total Retail': total_box_retail
+                    })
+            
+            # El valor objetivo ahora es el resultado neto (ingreso - coste)
+            total_net_result = prob.objective.value()
+            return box_details, total_net_result, status_str
+        
+        else:
+            # Si no es óptimo, devolvemos listas vacías y 0
+            return [], 0, status_str
+
+    except Exception as e:
+        print(f"Error en el optimizador: {e}")
+        return [], 0, f"Error: {e}"
